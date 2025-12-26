@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== UI =====
 is_tty=0; [ -t 1 ] && is_tty=1
 if [ "$is_tty" -eq 1 ]; then
   GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[1;34m'; NC='\033[0m'
@@ -18,16 +17,13 @@ trap 'err "Failed on line $LINENO"' ERR
 [[ $EUID -eq 0 ]] || { err "Run as root (sudo)."; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
-# ===== STATE =====
 STATE_DIR="${STATE_DIR:-/var/lib/wafcontrol-installer}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.env}"
 mkdir -p "$STATE_DIR"; touch "$STATE_FILE"
 state_append_array() { printf '%s+=(%q)\n' "$1" "$2" >> "$STATE_FILE"; }
 state_put_map()      { printf '%s[%q]=%q\n' "$1" "$2" "$3" >> "$STATE_FILE"; }
-# shellcheck disable=SC1090
 source "$STATE_FILE" 2>/dev/null || true
 
-# ===== INPUTS =====
 APP_DIR="${APP_DIR:?}"
 VENV_DIR="${VENV_DIR:?}"
 RUNTIME_DIR="${RUNTIME_DIR:?}"
@@ -44,7 +40,6 @@ BASIC_AUTH_PASS="${BASIC_AUTH_PASS:-}"
 
 banner "Nginx + ModSecurity v3 + CRS" "=" 72
 
-# 1) Nginx presence
 if ! command -v nginx >/dev/null 2>&1; then
   say "Installing Nginx from nginx.org..."
   curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
@@ -58,9 +53,8 @@ else
 fi
 
 NGX_MAIN="/etc/nginx/nginx.conf"
-[[ -f "$NGX_MAIN" ]] || { err "nginx.conf not found"; }
+[[ -f "$NGX_MAIN" ]] || { err "nginx.conf not found"; exit 1; }
 
-# Detect nginx user/group
 detect_from_file() {
   local file="$1"
   [ -r "$file" ] || return 1
@@ -88,7 +82,6 @@ NGX_USER="$(detect_nginx_user)"
 NGX_GROUP="$(id -gn "$NGX_USER" 2>/dev/null || echo "$NGX_USER")"
 say "Detected nginx user: $NGX_USER (group: $NGX_GROUP)"
 
-# 2) libmodsecurity
 apt update -y
 apt install -y libmodsecurity3 libmodsecurity-dev || true
 
@@ -121,10 +114,29 @@ else
   say "libmodsecurity present via packages."
 fi
 
-# 3) Build dynamic module
 test -d /usr/local/src/ModSecurity-nginx || git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git /usr/local/src/ModSecurity-nginx
 NVER="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" || NVER=""
-[[ -n "$NVER" ]] || { err "Cannot detect Nginx version."; }
+[[ -n "$NVER" ]] || { err "Cannot detect Nginx version."; exit 1; }
+
+detect_modules_dir() {
+  local mp=""
+  mp="$(nginx -V 2>&1 | sed -n 's/.*--modules-path=\([^ ]*\).*/\1/p' | tail -n1 || true)"
+  if [[ -n "$mp" ]]; then
+    echo "$mp"
+    return 0
+  fi
+  for d in /usr/lib/nginx/modules /usr/lib64/nginx/modules /usr/share/nginx/modules /etc/nginx/modules; do
+    if [[ -d "$d" ]]; then
+      echo "$d"
+      return 0
+    fi
+  done
+  echo "/usr/lib/nginx/modules"
+  return 0
+}
+
+MOD_DIR="$(detect_modules_dir)"
+say "Using modules dir: $MOD_DIR"
 
 mkdir -p /usr/local/src/nginx && cd /usr/local/src/nginx
 if [[ ! -d "nginx-${NVER}" ]]; then
@@ -137,17 +149,17 @@ apt-get build-dep -y nginx || true
 cd "nginx-${NVER}"
 ./configure --with-compat --add-dynamic-module=/usr/local/src/ModSecurity-nginx
 make modules
-install -d /usr/share/nginx/modules
-cp -f objs/ngx_http_modsecurity_module.so /usr/share/nginx/modules/
-state_append_array CREATED_FILES "/usr/share/nginx/modules/ngx_http_modsecurity_module.so"
+
+install -d -m 0755 "$MOD_DIR"
+cp -f objs/ngx_http_modsecurity_module.so "$MOD_DIR/ngx_http_modsecurity_module.so"
+state_append_array CREATED_FILES "$MOD_DIR/ngx_http_modsecurity_module.so"
 say "Dynamic module built."
 
-# 4) Enable module + http directives
 TS="$(date +%s)"
 if ! grep -q 'ngx_http_modsecurity_module.so' "$NGX_MAIN" 2>/dev/null; then
   cp -a "$NGX_MAIN" "${NGX_MAIN}.bak.${TS}"
   state_put_map BACKUPS "$NGX_MAIN" "${NGX_MAIN}.bak.${TS}"
-  sed -i '1iload_module /usr/share/nginx/modules/ngx_http_modsecurity_module.so;' "$NGX_MAIN"
+  sed -i "1iload_module ${MOD_DIR}/ngx_http_modsecurity_module.so;" "$NGX_MAIN"
   say "Injected load_module into nginx.conf"
 fi
 
@@ -164,12 +176,11 @@ find_http_file() {
   echo ""
 }
 HTTP_FILE="$(find_http_file)"
-[[ -n "$HTTP_FILE" ]] || { err "Could not locate a file containing the http { } block."; }
+[[ -n "$HTTP_FILE" ]] || { err "Could not locate a file containing the http { } block."; exit 1; }
 
 MDIR="/etc/nginx/modsec"
 mkdir -p "$MDIR"
 
-# Robust creation of modsecurity.conf from a recommended template when available
 copy_recommended_modsec_conf() {
   local c
   for c in \
@@ -203,7 +214,6 @@ CONF
   fi
 fi
 
-# Ensure unicode.mapping if available
 for um in \
   "/etc/modsecurity/unicode.mapping" \
   "/usr/share/doc/modsecurity-crs/examples/unicode.mapping" \
@@ -215,7 +225,6 @@ do
   fi
 done
 
-# Enforce SecRuleEngine On
 sed -i -E 's/^\s*SecRuleEngine\s+DetectionOnly/SecRuleEngine On/i' "$MDIR/modsecurity.conf" || true
 grep -qE '^\s*SecRuleEngine\s+' "$MDIR/modsecurity.conf" || echo "SecRuleEngine On" >> "$MDIR/modsecurity.conf"
 
@@ -258,7 +267,6 @@ else
   warn "WAF block already present in $HTTP_FILE; skipping insert."
 fi
 
-# 5) CRS
 say "Fetching latest CRS..."
 TAG="$(curl -s https://api.github.com/repos/coreruleset/coreruleset/releases/latest | jq -r '.tag_name' || true)"
 CRS_DIR=""
@@ -284,7 +292,7 @@ else
     err "Failed to resolve latest CRS and no packaged CRS found."
   fi
 fi
-[[ -d "$CRS_DIR" ]] || { err "CRS directory missing: $CRS_DIR"; }
+[[ -d "$CRS_DIR" ]] || { err "CRS directory missing: $CRS_DIR"; exit 1; }
 [[ -f "$CRS_DIR/crs-setup.conf" ]] || { [[ -f "$CRS_DIR/crs-setup.conf.example" ]] && cp "$CRS_DIR/crs-setup.conf.example" "$CRS_DIR/crs-setup.conf"; }
 for f in REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf; do
   [[ -f "$CRS_DIR/rules/$f" ]] || { [[ -f "$CRS_DIR/rules/${f}.example" ]] && cp "$CRS_DIR/rules/$f.example" "$CRS_DIR/rules/${f}" || true; }
@@ -292,7 +300,6 @@ done
 EXCL="$CRS_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"
 if ! grep -q '/crs/rules/save/' "$EXCL" 2>/dev/null; then
   cat >> "$EXCL" <<'EOR'
-# WAF dashboard exclusions
 SecRule REQUEST_URI "@beginsWith /crs/rules/save/"        "id:1500010,phase:1,nolog,pass,ctl:ruleEngine=Off"
 SecRule REQUEST_URI "@beginsWith /dashboard/crs/settings/" "id:1500011,phase:1,nolog,pass,ctl:ruleEngine=Off"
 EOR
@@ -306,7 +313,6 @@ sed -i '/Include .*rules\/\*.conf/d' "$MAIN" || true
 state_append_array CRS_DIRS "$CRS_DIR"
 say "CRS wired: $(basename "$CRS_DIR")"
 
-# 6) App vhost (+ optional Basic Auth)
 VHOST="/etc/nginx/conf.d/wafcontrol.conf"
 AUTH_SNIPPET=""
 if [[ "${BASIC_AUTH_ENABLE}" = "1" && -n "${BASIC_AUTH_USER}" && -n "${BASIC_AUTH_PASS}" ]]; then
@@ -383,10 +389,10 @@ NGX
   say "App vhost written: $VHOST (port ${HTTP_PORT})"
 fi
 
-# 7) Test & reload
 if nginx -t; then
   systemctl reload nginx
   say "Nginx WAF ready (ModSecurity v3 + CRS)."
 else
   err "nginx -t failed. Check the configuration."
+  exit 1
 fi
