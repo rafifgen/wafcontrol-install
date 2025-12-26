@@ -390,7 +390,7 @@ NGX
 fi
 
 if nginx -t; then
-  systemctl reload nginx
+  systemctl restart nginx
   say "Nginx WAF ready (ModSecurity v3 + CRS)."
 else
   err "nginx -t failed. Check the configuration."

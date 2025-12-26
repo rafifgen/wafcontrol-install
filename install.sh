@@ -124,7 +124,47 @@ gen_pass() {
   fi
 }
 
-# ===== Defaults =====
+detect_webserver_choice() {
+  local have_nginx=0 have_apache=0
+  command -v nginx >/dev/null 2>&1 && have_nginx=1
+  command -v apache2ctl >/dev/null 2>&1 && have_apache=1
+
+  if [ $have_nginx -eq 1 ] && [ $have_apache -eq 0 ]; then
+    echo "nginx"
+  elif [ $have_nginx -eq 0 ] && [ $have_apache -eq 1 ]; then
+    echo "apache"
+  else
+    echo ""
+  fi
+}
+
+find_postgresql_conf() {
+  local v="${1:-}"
+  if [ -n "$v" ]; then
+    local p
+    p=$(find "/etc/postgresql/${v}" -maxdepth 3 -name postgresql.conf 2>/dev/null | head -n1 || true)
+    [ -n "$p" ] && { echo "$p"; return; }
+  fi
+  local any
+  any=$(find /etc/postgresql -maxdepth 4 -name postgresql.conf 2>/dev/null | head -n1 || true)
+  [ -n "$any" ] && { echo "$any"; return; }
+  echo ""
+}
+
+extract_port_from_conf() {
+  local conf="$1"
+  [ -r "$conf" ] || { echo ""; return; }
+  awk '
+    /^[[:space:]]*#/ {next}
+    /^[[:space:]]*port[[:space:]]*=/ {
+      gsub(/[[:space:]]+/,"")
+      sub(/port=/,"")
+      sub(/#.*/,"")
+      print; found=$0
+    }
+  END{ if (found) print found }' "$conf" | tail -n1 | tr -d '[:space:]'
+}
+
 APP_USER="${APP_USER:-wafcontrol}"
 APP_DIR="${APP_DIR:-/opt/WafControl}"
 VENV_DIR="${VENV_DIR:-$APP_DIR/venv}"
@@ -142,57 +182,12 @@ DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-5432}"
 PG_VERSION="${PG_VERSION:-}"
 
+DEFAULT_PG_VER="${DEFAULT_PG_VER:-18}"
+
 BASIC_AUTH_ENABLE="${BASIC_AUTH_ENABLE:-0}"
 BASIC_AUTH_USER="${BASIC_AUTH_USER:-}"
 BASIC_AUTH_PASS="${BASIC_AUTH_PASS:-}"
 
-# ===== Helpers (new) =====
-detect_webserver_choice() {
-  local have_nginx=0 have_apache=0
-  command -v nginx >/dev/null 2>&1 && have_nginx=1
-  command -v apache2ctl >/dev/null 2>&1 && have_apache=1
-
-  if [ $have_nginx -eq 1 ] && [ $have_apache -eq 0 ]; then
-    echo "nginx"
-  elif [ $have_nginx -eq 0 ] && [ $have_apache -eq 1 ]; then
-    echo "apache"
-  else
-    echo ""  # ambiguous -> ask user
-  fi
-}
-
-find_postgresql_conf() {
-  local v="${1:-}"
-  # Try Debian/Ubuntu layout first
-  if [ -n "$v" ]; then
-    local p
-    p=$(find "/etc/postgresql/${v}" -maxdepth 3 -name postgresql.conf 2>/dev/null | head -n1 || true)
-    [ -n "$p" ] && { echo "$p"; return; }
-  fi
-  # Fallback: any postgresql.conf under /etc/postgresql
-  local any
-  any=$(find /etc/postgresql -maxdepth 4 -name postgresql.conf 2>/dev/null | head -n1 || true)
-  [ -n "$any" ] && { echo "$any"; return; }
-  echo ""
-}
-
-extract_port_from_conf() {
-  local conf="$1"
-  [ -r "$conf" ] || { echo ""; return; }
-  # Pick the last uncommented 'port = NNNN' assignment
-  awk '
-    /^[[:space:]]*#/ {next}
-    /^[[:space:]]*port[[:space:]]*=/ {
-      gsub(/[[:space:]]+/,"")
-      sub(/port=/,"")
-      # remove trailing comments if any
-      sub(/#.*/,"")
-      print; found=$0
-    }
-  END{ if (found) print found }' "$conf" | tail -n1 | tr -d '[:space:]'
-}
-
-# ===== Intro =====
 banner "WafControl Installer (Debian/Ubuntu)" "=" 72
 cat <<'TXT'
 This guided installer will set up:
@@ -205,7 +200,6 @@ This guided installer will set up:
 TXT
 line "-" 72
 
-# ===== Web server selection (auto if unambiguous) =====
 echo
 section "Web server selection"
 auto_srv="$(detect_webserver_choice || true)"
@@ -217,7 +211,7 @@ else
   echo "Type 'apache' to enable ModSecurity2 and apply latest CRS."
   read -rp "Choose [nginx/apache] (default: nginx): " SERVER
   SERVER="${SERVER:-nginx}"
-  [[ "$SERVER" =~ ^(nginx|apache)$ ]] || { err "Invalid server: $SERVER"; }
+  [[ "$SERVER" =~ ^(nginx|apache)$ ]] || { err "Invalid server: $SERVER"; exit 1; }
 fi
 
 echo
@@ -229,7 +223,7 @@ MODE="${MODE:-ip}"
 
 if [[ "$MODE" == "domain" && -z "${DOMAIN:-}" ]]; then
   read -rp "Enter domain (e.g. waf.example.com): " DOMAIN
-  [[ -z "$DOMAIN" ]] && { err "Domain is required for domain mode."; }
+  [[ -z "$DOMAIN" ]] && { err "Domain is required for domain mode."; exit 1; }
 fi
 
 SSL_ENABLE=0
@@ -254,7 +248,6 @@ if command -v psql >/dev/null 2>&1; then
   PG_VERSION="${INSTALLED_MAJOR}"
   say "PostgreSQL detected: version ${PG_VERSION} (will be reused)."
 
-  # NEW: detect actual port from postgresql.conf
   conf_path="$(find_postgresql_conf "$PG_VERSION")"
   if [ -n "$conf_path" ]; then
     det_port="$(extract_port_from_conf "$conf_path")"
@@ -268,9 +261,17 @@ if command -v psql >/dev/null 2>&1; then
     say "postgresql.conf not found for auto-port detection. Using default ${DB_PORT}."
   fi
 else
-  echo "PostgreSQL not detected. Provide the major version to install (e.g. 17)."
-  read -rp "PostgreSQL major version to install: " PG_VERSION
-  [[ -z "$PG_VERSION" ]] && { err "PG_VERSION is required."; }
+  echo "PostgreSQL not detected."
+  echo "Enter the major version to install, for example: 17, 18, or any version you want."
+  while :; do
+    read -rp "PostgreSQL major version to install [${DEFAULT_PG_VER}]: " PG_VERSION
+    PG_VERSION="${PG_VERSION:-$DEFAULT_PG_VER}"
+    if [[ "$PG_VERSION" =~ ^[0-9]+$ ]]; then
+      break
+    fi
+    warn "Invalid PG_VERSION. Enter a number like 14, 15, 16, 17, 18."
+  done
+  say "Selected PostgreSQL major version: ${PG_VERSION}"
 fi
 
 read -rp "Database name [wafcontrol]: " IN_DBNAME
@@ -322,12 +323,10 @@ echo "• Basic Auth:   $([[ $BASIC_AUTH_ENABLE -eq 1 ]] && echo "enabled (user=
 read -rp "Proceed with installation? [y/N]: " PROCEED
 [[ "$PROCEED" =~ ^[Yy]$ ]] || { warn "Aborted."; exit 0; }
 
-# ===== Prepare apt sources (Debian only) =====
 if [ "$(detect_os)" = "debian" ]; then
   ensure_debian_sources
 fi
 
-# ===== State =====
 state_bootstrap
 state_put_flag "server" "$SERVER"
 state_put_flag "mode" "$MODE"
@@ -342,11 +341,9 @@ state_put_flag "runtime_dir" "$RUNTIME_DIR"
 state_put_flag "basic_auth_enable" "$BASIC_AUTH_ENABLE"
 state_put_flag "basic_auth_user" "$BASIC_AUTH_USER"
 
-# Export for modules (after values exist)
 export BASIC_AUTH_ENABLE BASIC_AUTH_USER BASIC_AUTH_PASS
 export SSL_ENABLE CERTBOT_EMAIL
 
-# ===== Base packages =====
 banner "Installing base packages" "=" 72
 apt-get update -y
 
@@ -363,7 +360,6 @@ apt-get install -y --no-install-recommends \
   build-essential git pkg-config jq wget tar sed grep procps \
   libpq-dev redis-server openssl
 
-# ===== Project & venv =====
 banner "Fetching project and preparing Python environment" "=" 72
 mkdir -p "$APP_DIR"
 if [[ -d "$APP_DIR/.git" || -f "$APP_DIR/manage.py" ]]; then
@@ -379,7 +375,7 @@ if [[ ! -d "$VENV_DIR" ]]; then
   python3 -m venv "$VENV_DIR"
   state_append_array CREATED_FILES "$VENV_DIR"
 fi
-# shellcheck disable=SC1090
+
 source "${VENV_DIR}/bin/activate"
 python -m pip install --upgrade pip wheel setuptools
 REQ_FILE="${APP_DIR}/requirements.txt"
@@ -401,10 +397,8 @@ if [[ -z "${DB_PASS:-}" ]]; then
   DB_PASS="$(gen_pass)"; export DB_PASS; say "Generated DB password for ${DB_USER}."
 fi
 
-# ===== PostgreSQL module =====
 fetch_and_run "postgres.sh"
 
-# ===== .env and Django setup =====
 banner "Writing .env and preparing" "=" 72
 SECRET_KEY_VALUE="$(gen_pass)"
 CSRF_SEC=True; SESSION_SEC=True
@@ -448,6 +442,7 @@ fi
 banner "Verifying database connectivity" "=" 72
 if ! PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c 'select 1;' >/dev/null 2>&1; then
   err "Database auth failed. Check DB_USER/DB_PASS/DB_PORT/pg_hba.conf."
+  exit 1
 fi
 
 banner "Applying migrations and collecting static files" "=" 72
@@ -456,7 +451,6 @@ banner "Applying migrations and collecting static files" "=" 72
 mkdir -p "${APP_DIR}/frontend"
 "${VENV_DIR}/bin/python" "${APP_DIR}/manage.py" collectstatic --noinput
 
-# ===== Detect nginx group for units if server==nginx =====
 NGX_GROUP_FALLBACK="www-data"
 NGX_GROUP_VAL="$NGX_GROUP_FALLBACK"
 if [[ "$SERVER" == "nginx" ]]; then
@@ -491,7 +485,6 @@ if [[ "$SERVER" == "nginx" ]]; then
   say "Using web group for units: ${NGX_GROUP_VAL}"
 fi
 
-# ===== systemd units =====
 banner "Creating and enabling systemd units" "=" 72
 GUNI_UNIT="/etc/systemd/system/wafcontrol.service"
 CELERYW_UNIT="/etc/systemd/system/wafcontrol-celery-worker.service"
@@ -563,14 +556,12 @@ state_append_array CREATED_UNITS "$GUNI_UNIT"
 state_append_array CREATED_UNITS "$CELERYW_UNIT"
 state_append_array CREATED_UNITS "$CELERYB_UNIT"
 
-# ===== Web server modules =====
 if [[ "$SERVER" == "nginx" ]]; then
   fetch_and_run "waf-nginx.sh"
 else
   fetch_and_run "waf-apache.sh"
 fi
 
-# ===== Create admin =====
 echo
 banner "Create Wafcontrol Admin" "=" 72
 read -rp "Create now? [y/N]: " MKADMIN
