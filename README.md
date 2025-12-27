@@ -31,6 +31,18 @@ If you remove them anyway, the responsibility is entirely yours.
 
 The OWASP WAFControl project and its contributors are not responsible for data loss caused by manual or forced removal of system services.
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/wafcontrol/install/refs/heads/main/uninstall.sh -o uninstall.sh
+```
+
+```bash
+chmod +x uninstall.sh
+```
+
+```bash
+sudo ./uninstall.sh
+```
+
 
 ## WAFControl Resources
 - [OWASP WAFControl Project Site](https://wafcontrol.org/)
