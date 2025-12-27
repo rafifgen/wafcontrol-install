@@ -19,7 +19,17 @@ chmod +x install.sh
 ```bash
 sudo ./install.sh
 ```
+## Uninstall
 
+WAFControl provides an interactive and safe uninstallation process.
+
+⚠️ IMPORTANT
+
+If Nginx or PostgreSQL were already installed on your server before WAFControl, DO NOT remove them.
+Removing Nginx or PostgreSQL may break other applications and cause irreversible data loss.
+If you remove them anyway, the responsibility is entirely yours.
+
+The OWASP WAFControl project and its contributors are not responsible for data loss caused by manual or forced removal of system services.
 
 
 ## WAFControl Resources
