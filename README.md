@@ -29,7 +29,9 @@ If Nginx or PostgreSQL were already installed on your server before WAFControl, 
 Removing Nginx or PostgreSQL may break other applications and cause irreversible data loss.
 If you remove them anyway, the responsibility is entirely yours.
 
-The OWASP WAFControl project and its contributors are not responsible for data loss caused by manual or forced removal of system services.
+This BASH uninstall removes only the files and components added by WAFControl and does not modify NGINX or PostgreSQL (or any other system services).
+If PostgreSQL already existed on your server or contains data you want to remove, you must handle/remove it manually if needed.
+The OWASP WAFControl project and its contributors are not responsible for any data loss caused by manual or forced removal of system services.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wafcontrol/install/refs/heads/main/uninstall.sh -o uninstall.sh
