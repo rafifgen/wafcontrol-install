@@ -8,7 +8,7 @@ else
   GREEN=''; YELLOW=''; RED=''; BLUE=''; NC=''
 fi
 say()  { printf "%b[+]%b %s\n" "$GREEN" "$NC" "$*"; }
-warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*" >&2; }
+warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*"; }
 err()  { printf "%b[x]%b %s\n" "$RED" "$NC" "$*" >&2; }
 ok()   { printf "%b[OK]%b %s\n" "$GREEN" "$NC" "$*"; }
 line() { local ch="${1:-=}"; local w="${2:-72}"; printf '%*s\n' "$w" '' | tr ' ' "$ch"; }
@@ -122,26 +122,6 @@ gen_pass() {
   fi
 }
 
-ask_yn() {
-  local prompt="$1"
-  local def="${2:-N}"
-  local ans=""
-  while :; do
-    if [[ "$def" == "Y" ]]; then
-      read -rp "${prompt} [Y/n]: " ans
-      ans="${ans:-Y}"
-    else
-      read -rp "${prompt} [y/N]: " ans
-      ans="${ans:-N}"
-    fi
-    case "$ans" in
-      y|Y) return 0 ;;
-      n|N) return 1 ;;
-      *) warn "Please answer y or n." ;;
-    esac
-  done
-}
-
 detect_webserver_choice() {
   local have_nginx=0 have_apache=0
   command -v nginx >/dev/null 2>&1 && have_nginx=1
@@ -180,34 +160,6 @@ extract_port_from_conf() {
       print; found=$0
     }
   END{ if (found) print found }' "$conf" | tail -n1 | tr -d '[:space:]'
-}
-
-pg_exec() {
-  local sql="${1:?sql required}"
-  if command -v sudo >/dev/null 2>&1; then
-    sudo -u postgres psql -tAc "$sql" 2>/dev/null || true
-  else
-    su -s /bin/bash postgres -c "psql -tAc \"$sql\"" 2>/dev/null || true
-  fi
-}
-
-pg_role_exists() {
-  local role="${1:?role required}"
-  local out
-  out="$(pg_exec "SELECT 1 FROM pg_roles WHERE rolname='${role}';" | tr -d '[:space:]')"
-  [[ "$out" == "1" ]]
-}
-
-pg_db_exists() {
-  local db="${1:?db required}"
-  local out
-  out="$(pg_exec "SELECT 1 FROM pg_database WHERE datname='${db}';" | tr -d '[:space:]')"
-  [[ "$out" == "1" ]]
-}
-
-require_nonempty() {
-  local v="${1:-}"
-  [[ -n "$v" ]]
 }
 
 APP_USER="${APP_USER:-wafcontrol}"
@@ -288,9 +240,7 @@ fi
 
 echo
 section "PostgreSQL detection"
-HAVE_PG=0
 if command -v psql >/dev/null 2>&1; then
-  HAVE_PG=1
   INSTALLED_MAJOR="$(psql -V | awk '{print $3}' | cut -d. -f1)"
   PG_VERSION="${INSTALLED_MAJOR}"
   say "PostgreSQL detected: version ${PG_VERSION} (will be reused)."
@@ -324,10 +274,66 @@ fi
 read -rp "Database name [wafcontrol]: " IN_DBNAME
 read -rp "Database user [wafcontrol_user]: " IN_DBUSER
 read -srp "Database password [auto-generate if empty]: " IN_DBPASS; echo
-
 DB_NAME="${IN_DBNAME:-$DB_NAME}"
 DB_USER="${IN_DBUSER:-$DB_USER}"
 DB_PASS="${IN_DBPASS:-$DB_PASS}"
+
+echo
+section "Database reuse check"
+if command -v psql >/dev/null 2>&1 && [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    pg_query() { sudo -u postgres psql -tAc "$1" 2>/dev/null || true; }
+  else
+    pg_query() { su -s /bin/bash postgres -c "psql -tAc \"$1\"" 2>/dev/null || true; }
+  fi
+
+  db_exists="$(pg_query "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}';" | tr -d '[:space:]')"
+  role_exists="$(pg_query "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}';" | tr -d '[:space:]')"
+
+  if [[ "$db_exists" == "1" ]]; then
+    warn "Database already exists: ${DB_NAME}"
+  else
+    say "Database does not exist yet: ${DB_NAME}"
+  fi
+
+  if [[ "$role_exists" == "1" ]]; then
+    warn "Role already exists: ${DB_USER}"
+  else
+    say "Role does not exist yet: ${DB_USER}"
+  fi
+
+  if [[ "$db_exists" == "1" || "$role_exists" == "1" ]]; then
+    warn "You can reuse existing objects, or choose new names to avoid conflicts."
+    read -rp "Reuse existing database/user if present? [Y/n]: " REUSE
+    REUSE="${REUSE:-Y}"
+    if [[ "$REUSE" =~ ^[Nn]$ ]]; then
+      while :; do
+        read -rp "New database name: " DB_NAME
+        [[ -n "$DB_NAME" ]] || { warn "Database name cannot be empty."; continue; }
+        db_exists="$(pg_query "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}';" | tr -d '[:space:]')"
+        [[ "$db_exists" == "1" ]] && { warn "Database exists: ${DB_NAME}"; continue; }
+        break
+      done
+      while :; do
+        read -rp "New database user: " DB_USER
+        [[ -n "$DB_USER" ]] || { warn "User cannot be empty."; continue; }
+        [[ "$DB_USER" == *:* ]] && { warn "User cannot contain ':'."; continue; }
+        role_exists="$(pg_query "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}';" | tr -d '[:space:]')"
+        [[ "$role_exists" == "1" ]] && { warn "Role exists: ${DB_USER}"; continue; }
+        break
+      done
+      DB_PASS=""
+      read -srp "Database password [auto-generate if empty]: " DB_PASS; echo
+    fi
+  fi
+else
+  warn "Skipping local DB existence checks (psql missing or DB_HOST is not local)."
+fi
+
+if [[ -z "${DB_PASS:-}" ]]; then
+  DB_PASS="$(gen_pass)"
+  say "Generated DB password for ${DB_USER}."
+fi
 
 if [[ "$MODE" == "domain" && $SSL_ENABLE -eq 1 ]]; then
   CERTBOT_EMAIL_DEFAULT="admin@${DOMAIN}"
@@ -353,91 +359,6 @@ else
   BASIC_AUTH_ENABLE=0
   BASIC_AUTH_USER=""
   BASIC_AUTH_PASS=""
-fi
-
-if [[ "$HAVE_PG" -eq 1 ]]; then
-  echo
-  section "Database reuse check"
-  if [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]]; then
-    DB_EXIST=0
-    ROLE_EXIST=0
-    if pg_db_exists "$DB_NAME"; then DB_EXIST=1; fi
-    if pg_role_exists "$DB_USER"; then ROLE_EXIST=1; fi
-
-    if [[ $DB_EXIST -eq 1 || $ROLE_EXIST -eq 1 ]]; then
-      warn "Existing PostgreSQL objects detected:"
-      [[ $DB_EXIST -eq 1 ]] && warn "  - Database exists: $DB_NAME"
-      [[ $ROLE_EXIST -eq 1 ]] && warn "  - Role exists:     $DB_USER"
-
-      if ask_yn "Reuse existing database/user if they exist?" "Y"; then
-        say "Will reuse existing objects where applicable."
-        if [[ $ROLE_EXIST -eq 1 ]]; then
-          if [[ -z "${DB_PASS:-}" ]]; then
-            warn "Password is required to connect as existing role '${DB_USER}'."
-            if ask_yn "Do you want to RESET the password for role '${DB_USER}' to a new generated one?" "N"; then
-              DB_PASS="$(gen_pass)"
-              say "Generated a new password for ${DB_USER}."
-              if command -v sudo >/dev/null 2>&1; then
-                sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER ROLE \"${DB_USER}\" WITH PASSWORD '${DB_PASS}';" >/dev/null
-              else
-                su -s /bin/bash postgres -c "psql -v ON_ERROR_STOP=1 -c \"ALTER ROLE \\\"${DB_USER}\\\" WITH PASSWORD '${DB_PASS}';\"" >/dev/null
-              fi
-              say "Role password updated."
-            else
-              while :; do
-                read -srp "Enter password for existing role '${DB_USER}': " DB_PASS; echo
-                [[ -n "$DB_PASS" ]] && break
-                warn "Password cannot be empty for existing role."
-              done
-            fi
-          fi
-        else
-          if [[ -z "${DB_PASS:-}" ]]; then
-            DB_PASS="$(gen_pass)"
-            say "Generated DB password for new role ${DB_USER}."
-          fi
-        fi
-      else
-        say "Please choose new database/user names."
-        while :; do
-          read -rp "New database name: " DB_NAME
-          if [[ -z "$DB_NAME" ]]; then warn "Database name cannot be empty."; continue; fi
-          if pg_db_exists "$DB_NAME"; then warn "Database already exists: $DB_NAME"; continue; fi
-          break
-        done
-        while :; do
-          read -rp "New database user: " DB_USER
-          if [[ -z "$DB_USER" ]]; then warn "User cannot be empty."; continue; fi
-          if [[ "$DB_USER" == *:* ]]; then warn "User cannot contain ':'."; continue; fi
-          if pg_role_exists "$DB_USER"; then warn "Role already exists: $DB_USER"; continue; fi
-          break
-        done
-        DB_PASS=""
-        read -srp "Database password [auto-generate if empty]: " DB_PASS; echo
-        if [[ -z "${DB_PASS:-}" ]]; then
-          DB_PASS="$(gen_pass)"
-          say "Generated DB password for ${DB_USER}."
-        fi
-      fi
-    else
-      say "No existing DB/user conflicts detected."
-      if [[ -z "${DB_PASS:-}" ]]; then
-        DB_PASS="$(gen_pass)"
-        say "Generated DB password for ${DB_USER}."
-      fi
-    fi
-  else
-    warn "DB_HOST is not local (${DB_HOST}). Skipping local existence checks."
-    if [[ -z "${DB_PASS:-}" ]]; then
-      DB_PASS="$(gen_pass)"
-      say "Generated DB password for ${DB_USER}."
-    fi
-  fi
-else
-  if [[ -z "${DB_PASS:-}" ]]; then
-    DB_PASS="$(gen_pass)"
-    say "Generated DB password for ${DB_USER}."
-  fi
 fi
 
 echo
@@ -473,10 +394,6 @@ state_put_flag "venv_dir" "$VENV_DIR"
 state_put_flag "runtime_dir" "$RUNTIME_DIR"
 state_put_flag "basic_auth_enable" "$BASIC_AUTH_ENABLE"
 state_put_flag "basic_auth_user" "$BASIC_AUTH_USER"
-state_put_flag "db_name" "$DB_NAME"
-state_put_flag "db_user" "$DB_USER"
-state_put_flag "db_host" "$DB_HOST"
-state_put_flag "db_port" "$DB_PORT"
 
 export BASIC_AUTH_ENABLE BASIC_AUTH_USER BASIC_AUTH_PASS
 export SSL_ENABLE CERTBOT_EMAIL
@@ -515,6 +432,7 @@ fi
 
 source "${VENV_DIR}/bin/activate"
 python -m pip install --upgrade pip wheel setuptools
+
 REQ_FILE="${APP_DIR}/requirements.txt"
 if [[ -f "$REQ_FILE" ]]; then
   say "Installing Python requirements..."
