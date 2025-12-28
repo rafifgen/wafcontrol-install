@@ -162,6 +162,9 @@ extract_port_from_conf() {
   END{ if (found) print found }' "$conf" | tail -n1 | tr -d '[:space:]'
 }
 
+dbname_is_valid() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
+dbuser_is_valid() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
+
 APP_USER="${APP_USER:-wafcontrol}"
 APP_DIR="${APP_DIR:-/opt/WafControl}"
 VENV_DIR="${VENV_DIR:-$APP_DIR/venv}"
@@ -263,23 +266,33 @@ else
   while :; do
     read -rp "PostgreSQL major version to install [${DEFAULT_PG_VER}]: " PG_VERSION
     PG_VERSION="${PG_VERSION:-$DEFAULT_PG_VER}"
-    if [[ "$PG_VERSION" =~ ^[0-9]+$ ]]; then
-      break
-    fi
+    [[ "$PG_VERSION" =~ ^[0-9]+$ ]] && break
     warn "Invalid PG_VERSION. Enter a number like 14, 15, 16, 17, 18."
   done
   say "Selected PostgreSQL major version: ${PG_VERSION}"
 fi
 
-read -rp "Database name [wafcontrol]: " IN_DBNAME
-read -rp "Database user [wafcontrol_user]: " IN_DBUSER
+echo
+section "Database configuration"
+while :; do
+  read -rp "Database name [${DB_NAME}]: " IN_DBNAME
+  IN_DBNAME="${IN_DBNAME:-$DB_NAME}"
+  dbname_is_valid "$IN_DBNAME" && { DB_NAME="$IN_DBNAME"; break; }
+  warn "Invalid database name. Use letters/numbers/underscore and start with a letter or underscore."
+done
+
+while :; do
+  read -rp "Database user [${DB_USER}]: " IN_DBUSER
+  IN_DBUSER="${IN_DBUSER:-$DB_USER}"
+  dbuser_is_valid "$IN_DBUSER" && { DB_USER="$IN_DBUSER"; break; }
+  warn "Invalid database user. Use letters/numbers/underscore and start with a letter or underscore."
+done
+
 read -srp "Database password [auto-generate if empty]: " IN_DBPASS; echo
-DB_NAME="${IN_DBNAME:-$DB_NAME}"
-DB_USER="${IN_DBUSER:-$DB_USER}"
 DB_PASS="${IN_DBPASS:-$DB_PASS}"
 
 echo
-section "Database reuse check"
+section "Database existence check"
 if command -v psql >/dev/null 2>&1 && [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]]; then
   if command -v sudo >/dev/null 2>&1; then
     pg_query() { sudo -u postgres psql -tAc "$1" 2>/dev/null || true; }
@@ -287,47 +300,55 @@ if command -v psql >/dev/null 2>&1 && [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST"
     pg_query() { su -s /bin/bash postgres -c "psql -tAc \"$1\"" 2>/dev/null || true; }
   fi
 
-  db_exists="$(pg_query "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}';" | tr -d '[:space:]')"
-  role_exists="$(pg_query "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}';" | tr -d '[:space:]')"
+  while :; do
+    db_exists="$(pg_query "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}';" | tr -d '[:space:]')"
+    role_exists="$(pg_query "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}';" | tr -d '[:space:]')"
 
-  if [[ "$db_exists" == "1" ]]; then
-    warn "Database already exists: ${DB_NAME}"
-  else
-    say "Database does not exist yet: ${DB_NAME}"
-  fi
+    if [[ "$db_exists" == "1" || "$role_exists" == "1" ]]; then
+      warn "Existing objects detected:"
+      [[ "$db_exists" == "1" ]] && warn "  - Database exists: ${DB_NAME}"
+      [[ "$role_exists" == "1" ]] && warn "  - Role exists:     ${DB_USER}"
+      echo "Choose what to do:"
+      echo "  1) Reuse existing database/user (recommended if this is a reinstall)"
+      echo "  2) Enter NEW database/user names (recommended if you want a fresh install without touching existing data)"
+      read -rp "Select [1/2] (default: 1): " CH
+      CH="${CH:-1}"
 
-  if [[ "$role_exists" == "1" ]]; then
-    warn "Role already exists: ${DB_USER}"
-  else
-    say "Role does not exist yet: ${DB_USER}"
-  fi
+      if [[ "$CH" == "1" ]]; then
+        say "Reusing existing database/user."
+        break
+      fi
 
-  if [[ "$db_exists" == "1" || "$role_exists" == "1" ]]; then
-    warn "You can reuse existing objects, or choose new names to avoid conflicts."
-    read -rp "Reuse existing database/user if present? [Y/n]: " REUSE
-    REUSE="${REUSE:-Y}"
-    if [[ "$REUSE" =~ ^[Nn]$ ]]; then
+      echo
+      section "Enter new database/user names"
       while :; do
         read -rp "New database name: " DB_NAME
         [[ -n "$DB_NAME" ]] || { warn "Database name cannot be empty."; continue; }
+        dbname_is_valid "$DB_NAME" || { warn "Invalid database name format."; continue; }
         db_exists="$(pg_query "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}';" | tr -d '[:space:]')"
         [[ "$db_exists" == "1" ]] && { warn "Database exists: ${DB_NAME}"; continue; }
         break
       done
+
       while :; do
         read -rp "New database user: " DB_USER
         [[ -n "$DB_USER" ]] || { warn "User cannot be empty."; continue; }
-        [[ "$DB_USER" == *:* ]] && { warn "User cannot contain ':'."; continue; }
+        dbuser_is_valid "$DB_USER" || { warn "Invalid user format."; continue; }
         role_exists="$(pg_query "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}';" | tr -d '[:space:]')"
         [[ "$role_exists" == "1" ]] && { warn "Role exists: ${DB_USER}"; continue; }
         break
       done
+
       DB_PASS=""
       read -srp "Database password [auto-generate if empty]: " DB_PASS; echo
+      continue
     fi
-  fi
+
+    say "No conflicts detected for DB_NAME/DB_USER."
+    break
+  done
 else
-  warn "Skipping local DB existence checks (psql missing or DB_HOST is not local)."
+  warn "Skipping DB existence check (psql missing or DB_HOST not local)."
 fi
 
 if [[ -z "${DB_PASS:-}" ]]; then
