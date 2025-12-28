@@ -8,7 +8,7 @@ else
   GREEN=''; YELLOW=''; RED=''; BLUE=''; NC=''
 fi
 say()  { printf "%b[+]%b %s\n" "$GREEN" "$NC" "$*"; }
-warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*"; }
+warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*" >&2; }
 err()  { printf "%b[x]%b %s\n" "$RED" "$NC" "$*" >&2; }
 ok()   { printf "%b[OK]%b %s\n" "$GREEN" "$NC" "$*"; }
 line() { local ch="${1:-=}"; local w="${2:-72}"; printf '%*s\n' "$w" '' | tr ' ' "$ch"; }
@@ -39,7 +39,6 @@ state_bootstrap() {
   fi
 }
 state_append_array() { printf '%s+=(%q)\n' "$1" "$2" >> "$STATE_FILE"; }
-state_put_map()      { printf '%s[%q]=%q\n' "$1" "$2" "$3" >> "$STATE_FILE"; }
 state_put_flag()     { printf 'FLAGS[%q]=%q\n' "$1" "$2" >> "$STATE_FILE"; }
 
 fetch_and_run() {
@@ -273,7 +272,7 @@ else
 fi
 
 echo
-section "Database configuration"
+section "Database configuration (fresh install)"
 while :; do
   read -rp "Database name [${DB_NAME}]: " IN_DBNAME
   IN_DBNAME="${IN_DBNAME:-$DB_NAME}"
@@ -292,7 +291,7 @@ read -srp "Database password [auto-generate if empty]: " IN_DBPASS; echo
 DB_PASS="${IN_DBPASS:-$DB_PASS}"
 
 echo
-section "Database existence check"
+section "Database availability check"
 if command -v psql >/dev/null 2>&1 && [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]]; then
   if command -v sudo >/dev/null 2>&1; then
     pg_query() { sudo -u postgres psql -tAc "$1" 2>/dev/null || true; }
@@ -305,22 +304,11 @@ if command -v psql >/dev/null 2>&1 && [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST"
     role_exists="$(pg_query "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}';" | tr -d '[:space:]')"
 
     if [[ "$db_exists" == "1" || "$role_exists" == "1" ]]; then
-      warn "Existing objects detected:"
+      warn "Conflicting objects detected:"
       [[ "$db_exists" == "1" ]] && warn "  - Database exists: ${DB_NAME}"
       [[ "$role_exists" == "1" ]] && warn "  - Role exists:     ${DB_USER}"
-      echo "Choose what to do:"
-      echo "  1) Reuse existing database/user (recommended if this is a reinstall)"
-      echo "  2) Enter NEW database/user names (recommended if you want a fresh install without touching existing data)"
-      read -rp "Select [1/2] (default: 1): " CH
-      CH="${CH:-1}"
+      warn "Please enter NEW names to avoid conflicts."
 
-      if [[ "$CH" == "1" ]]; then
-        say "Reusing existing database/user."
-        break
-      fi
-
-      echo
-      section "Enter new database/user names"
       while :; do
         read -rp "New database name: " DB_NAME
         [[ -n "$DB_NAME" ]] || { warn "Database name cannot be empty."; continue; }
@@ -348,7 +336,7 @@ if command -v psql >/dev/null 2>&1 && [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST"
     break
   done
 else
-  warn "Skipping DB existence check (psql missing or DB_HOST not local)."
+  warn "Skipping DB availability check (psql missing or DB_HOST not local)."
 fi
 
 if [[ -z "${DB_PASS:-}" ]]; then
