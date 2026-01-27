@@ -50,6 +50,13 @@ else
   say "Apache detected; reusing existing installation."
 fi
 
+if [[ -f /etc/apache2/envvars ]]; then
+  set +u
+  . /etc/apache2/envvars
+  set -u
+fi
+APACHE_LOG_DIR="${APACHE_LOG_DIR:-/var/log/apache2}"
+
 banner "Installing ModSecurity2 and preparing CRS"
 apt update -y
 apt install -y libapache2-mod-security2 libmodsecurity3 curl jq wget tar gzip || true
