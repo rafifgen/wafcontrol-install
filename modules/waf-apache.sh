@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== UI =====
 is_tty=0; [ -t 1 ] && is_tty=1
 if [ "$is_tty" -eq 1 ]; then
   GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[1;34m'; NC='\033[0m'
@@ -9,7 +8,7 @@ else
   GREEN=''; YELLOW=''; RED=''; BLUE=''; NC=''
 fi
 say()  { printf "%b[+]%b %s\n" "$GREEN" "$NC" "$*"; }
-warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*"; }
+warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*" >&2; }
 err()  { printf "%b[x]%b %s\n" "$RED" "$NC" "$*" >&2; }
 line() { local ch="${1:-=}"; local w="${2:-72}"; printf '%*s\n' "$w" '' | tr ' ' "$ch"; }
 banner(){ local title="$1"; local ch="${2:-=}"; local w="${3:-72}"; line "$ch" "$w"; printf "%b%s%b\n" "$BLUE" "$title" "$NC"; line "$ch" "$w"; }
@@ -18,16 +17,13 @@ trap 'err "Failed on line $LINENO"' ERR
 [[ $EUID -eq 0 ]] || { err "Run as root (sudo)."; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
-# ===== STATE =====
 STATE_DIR="${STATE_DIR:-/var/lib/wafcontrol-installer}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.env}"
 mkdir -p "$STATE_DIR"; touch "$STATE_FILE"
 state_append_array() { printf '%s+=(%q)\n' "$1" "$2" >> "$STATE_FILE"; }
 state_put_map()      { printf '%s[%q]=%q\n' "$1" "$2" "$3" >> "$STATE_FILE"; }
-# shellcheck disable=SC1090
 source "$STATE_FILE" 2>/dev/null || true
 
-# ===== INPUTS =====
 APP_DIR="${APP_DIR:?}"
 VENV_DIR="${VENV_DIR:?}"
 RUNTIME_DIR="${RUNTIME_DIR:?}"
@@ -44,7 +40,6 @@ BASIC_AUTH_PASS="${BASIC_AUTH_PASS:-}"
 
 banner "Apache + ModSecurity2 + CRS"
 
-# 1) Apache presence
 if ! command -v apache2ctl >/dev/null 2>&1; then
   banner "Installing Apache"
   apt update -y
@@ -55,7 +50,6 @@ else
   say "Apache detected; reusing existing installation."
 fi
 
-# 2) ModSecurity2 + CRS prep
 banner "Installing ModSecurity2 and preparing CRS"
 apt update -y
 apt install -y libapache2-mod-security2 libmodsecurity3 curl jq wget tar gzip || true
@@ -73,7 +67,7 @@ if [[ ! -f "$MDIR/modsecurity.conf" ]]; then
     cp /etc/modsecurity/modsecurity.conf-recommended "$MDIR/modsecurity.conf"
   elif [[ -f /usr/share/doc/modsecurity-crs/examples/modsecurity.conf-recommended ]]; then
     cp /usr/share/doc/modsecurity-crs/examples/modsecurity.conf-recommended "$MDIR/modsecurity.conf"
-  elif [[ -f /usr/share/doc/modsecurity-crs/examples/modsecurity.conf-recommended.gz" ]]; then
+  elif [[ -f /usr/share/doc/modsecurity-crs/examples/modsecurity.conf-recommended.gz ]]; then
     zcat /usr/share/doc/modsecurity-crs/examples/modsecurity.conf-recommended.gz > "$MDIR/modsecurity.conf"
   else
     wget -qO "$MDIR/modsecurity.conf" "https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/modsecurity.conf-recommended" || true
@@ -83,7 +77,6 @@ fi
 sed -i 's/^\s*SecRuleEngine\s\+DetectionOnly/SecRuleEngine On/' "$MDIR/modsecurity.conf" || true
 grep -qE '^\s*SecRuleEngine\s+' "$MDIR/modsecurity.conf" || echo "SecRuleEngine On" >> "$MDIR/modsecurity.conf"
 
-# 3) Fetch latest CRS
 banner "Fetching Core Rule Set (CRS)"
 TAG="$(curl -s https://api.github.com/repos/coreruleset/coreruleset/releases/latest | jq -r '.tag_name' || true)"
 if [[ -n "$TAG" && "$TAG" != "null" ]]; then
@@ -123,7 +116,6 @@ for f in REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf RESPONSE-999-EXCLUSION-RULE
 done
 if [[ -f "${RULES}/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf" ]] && ! grep -q '/crs/rules/save/' "${RULES}/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"; then
   cat >> "${RULES}/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf" <<'EOR'
-# WAF dashboard exclusions
 SecRule REQUEST_URI "@beginsWith /crs/rules/save/"        "id:1500010,phase:1,nolog,pass,ctl:ruleEngine=Off"
 SecRule REQUEST_URI "@beginsWith /dashboard/crs/settings/" "id:1500011,phase:1,nolog,pass,ctl:ruleEngine=Off"
 EOR
@@ -133,7 +125,6 @@ ln -sfn "$TGT" "$CRS_CURRENT"
 chmod -R a+rX "$CRS_ROOT"
 state_append_array CREATED_FILES "$CRS_CURRENT"
 
-# 4) Wire into Apache (security2.conf)
 banner "Wiring ModSecurity into Apache"
 SEC2="/etc/apache2/mods-available/security2.conf"
 TS="$(date +%s)"
@@ -154,7 +145,6 @@ apache2ctl configtest
 systemctl reload apache2
 say "Apache WAF ready (CRS: $(basename "$TGT"))."
 
-# 5) App vhost
 banner "Creating Apache vhost for WafControl"
 APACHE_CONF="/etc/apache2/sites-available/wafcontrol.conf"
 

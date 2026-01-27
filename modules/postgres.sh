@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== UI (pure ASCII, tty-aware) =====
 is_tty=0; [ -t 1 ] && is_tty=1
 if [ "$is_tty" -eq 1 ]; then
   GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[1;34m'; NC='\033[0m'
@@ -9,7 +8,7 @@ else
   GREEN=''; YELLOW=''; RED=''; BLUE=''; NC=''
 fi
 say()  { printf "%b[+]%b %s\n" "$GREEN" "$NC" "$*"; }
-warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*"; }
+warn() { printf "%b[!]%b %s\n" "$YELLOW" "$NC" "$*" >&2; }
 err()  { printf "%b[x]%b %s\n" "$RED" "$NC" "$*" >&2; }
 line() { local ch="${1:-=}"; local w="${2:-72}"; printf '%*s\n' "$w" '' | tr ' ' "$ch"; }
 banner(){ local title="$1"; local ch="${2:-=}"; local w="${3:-72}"; line "$ch" "$w"; printf "%b%s%b\n" "$BLUE" "$title" "$NC"; line "$ch" "$w"; }
@@ -18,14 +17,12 @@ trap 'err "Failed on line $LINENO"' ERR
 [[ $EUID -eq 0 ]] || { err "Run as root (sudo)."; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
-# ===== STATE =====
 STATE_DIR="${STATE_DIR:-/var/lib/wafcontrol-installer}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.env}"
 mkdir -p "$STATE_DIR"; touch "$STATE_FILE"
 state_put_map()  { printf '%s[%q]=%q\n' "$1" "$2" "$3" >> "$STATE_FILE"; }
 state_put_flag() { printf 'FLAGS[%q]=%q\n' "$1" "$2" >> "$STATE_FILE"; }
 
-# ===== INPUTS =====
 DB_NAME="${DB_NAME:?}"
 DB_USER="${DB_USER:?}"
 DB_PASS="${DB_PASS:?}"
@@ -42,26 +39,28 @@ pgdg_add_repo() {
   echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list
   apt update -y
 }
+
 ensure_postgres() {
   local v="$1"
   apt install -y "postgresql-${v}" "postgresql-client-${v}" libpq-dev "postgresql-server-dev-${v}"
   systemctl enable --now postgresql
-  for _ in {1..30}; do pg_isready >/dev/null 2>&1 && break; sleep 1; done
+  for _ in {1..60}; do pg_isready >/dev/null 2>&1 && break; sleep 1; done
 }
+
 find_pg_hba() {
   local v="$1" p
-  p=$(find "/etc/postgresql/${v}" -maxdepth 3 -name pg_hba.conf 2>/dev/null | head -n1)
-  [[ -z "$p" ]] && p=$(find /etc/postgresql -maxdepth 4 -name pg_hba.conf 2>/dev/null | head -n1)
+  p=$(find "/etc/postgresql/${v}" -maxdepth 3 -name pg_hba.conf 2>/dev/null | head -n1 || true)
+  [[ -z "$p" ]] && p=$(find /etc/postgresql -maxdepth 4 -name pg_hba.conf 2>/dev/null | head -n1 || true)
   echo "$p"
 }
 
-# --- NEW: find active postgresql.conf and extract port (minimal change) ---
 find_postgresql_conf() {
   local v="$1" p
-  p=$(find "/etc/postgresql/${v}" -maxdepth 3 -name postgresql.conf 2>/dev/null | head -n1)
-  [[ -z "$p" ]] && p=$(find /etc/postgresql -maxdepth 4 -name postgresql.conf 2>/dev/null | head -n1)
+  p=$(find "/etc/postgresql/${v}" -maxdepth 3 -name postgresql.conf 2>/dev/null | head -n1 || true)
+  [[ -z "$p" ]] && p=$(find /etc/postgresql -maxdepth 4 -name postgresql.conf 2>/dev/null | head -n1 || true)
   echo "$p"
 }
+
 extract_port_from_conf() {
   local conf="$1"
   [ -r "$conf" ] || { echo ""; return; }
@@ -79,7 +78,6 @@ if command -v psql >/dev/null 2>&1; then
   INSTALLED_MAJOR="$(psql -V | awk '{print $3}' | cut -d. -f1)"
   PG_VERSION="${INSTALLED_MAJOR}"
   say "Detected PostgreSQL ${PG_VERSION} (reuse)."
-  # NEW: detect real port if prior installation exists
   PG_CONF="$(find_postgresql_conf "$PG_VERSION")"
   if [ -n "$PG_CONF" ]; then
     det_port="$(extract_port_from_conf "$PG_CONF")"
@@ -90,14 +88,21 @@ if command -v psql >/dev/null 2>&1; then
     fi
   fi
 else
-  [[ -n "$PG_VERSION" ]] || { err "PG_VERSION is required."; }
+  [[ -n "$PG_VERSION" ]] || { err "PG_VERSION is required."; exit 1; }
   say "Installing PostgreSQL ${PG_VERSION} from PGDG..."
   pgdg_add_repo
+  if ! apt-cache show "postgresql-${PG_VERSION}" >/dev/null 2>&1; then
+    warn "PostgreSQL ${PG_VERSION} not available; falling back to 17"
+    PG_VERSION="17"
+  fi
   ensure_postgres "$PG_VERSION"
+  if command -v psql >/dev/null 2>&1; then
+    PG_VERSION="$(psql -V | awk '{print $3}' | cut -d. -f1)"
+  fi
 fi
 
 PG_HBA="$(find_pg_hba "$PG_VERSION")"
-[[ -n "$PG_HBA" ]] || { err "pg_hba.conf not found for major ${PG_VERSION}"; }
+[[ -n "$PG_HBA" ]] || { err "pg_hba.conf not found for major ${PG_VERSION}"; exit 1; }
 
 NEED_RESTORE=0
 if ! sudo -u postgres psql -tAc "SELECT 1" >/dev/null 2>&1; then
@@ -108,7 +113,7 @@ if ! sudo -u postgres psql -tAc "SELECT 1" >/dev/null 2>&1; then
   sed -i -E 's/^(local[[:space:]]+all[[:space:]]+all[[:space:]]+).*/\1trust/' "$PG_HBA"
   sed -i -E 's/^(local[[:space:]]+all[[:space:]]+postgres[[:space:]]+).*/\1trust/' "$PG_HBA" || true
   systemctl reload postgresql || systemctl restart postgresql
-  sudo -u postgres psql -tAc "SELECT 1" >/dev/null 2>&1 || { err "psql inaccessible even after temporary trust"; }
+  sudo -u postgres psql -tAc "SELECT 1" >/dev/null 2>&1 || { err "psql inaccessible even after temporary trust"; exit 1; }
 fi
 line "-" 72
 
