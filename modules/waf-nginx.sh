@@ -101,9 +101,10 @@ if ! pkg-config --exists libmodsecurity; then
     zlib1g-dev libxslt1-dev liblmdb-dev libgd-dev git uuid-dev
 
   cd /usr/local/src
-  test -d ModSecurity || git clone --depth 1 -b v3/master https://github.com/SpiderLabs/ModSecurity
+  test -d ModSecurity || git clone --depth 1 --recursive -b v3/master https://github.com/SpiderLabs/ModSecurity
   cd ModSecurity
-  git submodule update --init
+  git submodule sync --recursive
+  git submodule update --init --recursive
   ./build.sh
   ./configure
   make -j"$(nproc)"
