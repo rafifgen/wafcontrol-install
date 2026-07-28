@@ -19,7 +19,7 @@ trap 'err "Failed on line $LINENO"' ERR
 [[ $EUID -eq 0 ]] || { err "Run as root (sudo)."; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
-MODULE_BASE="${MODULE_BASE:-https://raw.githubusercontent.com/wafcontrol/install/refs/heads/main/modules/}"
+MODULE_BASE="${MODULE_BASE:-https://raw.githubusercontent.com/rafif/gen/wafcontrol-install/refs/heads/main/modules/}"
 STATE_DIR="${STATE_DIR:-/var/lib/wafcontrol-installer}"
 STATE_FILE="${STATE_FILE:-$STATE_DIR/state.env}"
 
