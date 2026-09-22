@@ -2,49 +2,7 @@
 
 # OWASP WAFControl Installer
 
-The **OWASP WAFControl** project provides a web-based dashboard and management interface for ModSecurity and the OWASP Core Rule Set (CRS).  
-It simplifies installation, configuration, and operation of CRS and ModSecurity, enabling administrators and security engineers to deploy, monitor, and manage WAF rules more effectively.
-
-
-## Easy Install
-
-```bash
-curl -fsSL https://wafcontrol.org/download/install.sh -o install.sh
-```
-
-```bash
-chmod +x install.sh
-```
-
-```bash
-sudo ./install.sh
-```
-## Uninstall
-
-WAFControl provides an interactive and safe uninstallation process.
-
-⚠️ IMPORTANT
-
-If Nginx or PostgreSQL were already installed on your server before WAFControl, DO NOT remove them.
-Removing Nginx or PostgreSQL may break other applications and cause irreversible data loss.
-If you remove them anyway, the responsibility is entirely yours.
-
-This BASH uninstall removes only the files and components added by WAFControl and does not modify NGINX or PostgreSQL (or any other system services).
-If PostgreSQL already existed on your server or contains data you want to remove, you must handle/remove it manually if needed.
-The OWASP WAFControl project and its contributors are not responsible for any data loss caused by manual or forced removal of system services.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/wafcontrol/install/refs/heads/main/uninstall.sh -o uninstall.sh
-```
-
-```bash
-chmod +x uninstall.sh
-```
-
-```bash
-sudo ./uninstall.sh
-```
-
+This is a fork of OWASP WAFControl Installer for myself since I need to build the libmodsecurity and its connector myself.
 
 ## WAFControl Resources
 - [OWASP WAFControl Project Site](https://wafcontrol.org/)
@@ -52,7 +10,6 @@ sudo ./uninstall.sh
 
 ## Documentation
 - [OWASP WAFControl Docs](https://wafcontrol.org/docs)
-
 
 ## License
 

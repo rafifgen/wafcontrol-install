@@ -617,6 +617,38 @@ state_append_array CREATED_UNITS "$CELERYW_UNIT"
 state_append_array CREATED_UNITS "$CELERYB_UNIT"
 
 if [[ "$SERVER" == "nginx" ]]; then
+  banner "Pre-check: ModSecurity prerequisites" "=" 72
+  if ! pkg-config --exists libmodsecurity 2>/dev/null; then
+    err "libmodsecurity not found. Please build and install it first:"
+    err "  https://github.com/SpiderLabs/ModSecurity/tree/v3/master"
+    exit 1
+  fi
+  say "libmodsecurity found."
+
+  NGX_MOD_DIR=""
+  mp="$(nginx -V 2>&1 | sed -n 's/.*--modules-path=\([^ ]*\).*/\1/p' | tail -n1 || true)"
+  if [[ -n "$mp" && -d "$mp" ]]; then
+    NGX_MOD_DIR="$mp"
+  else
+    for d in /usr/lib/nginx/modules /usr/lib64/nginx/modules /usr/share/nginx/modules /etc/nginx/modules; do
+      [[ -d "$d" ]] && { NGX_MOD_DIR="$d"; break; }
+    done
+  fi
+  if [[ -z "$NGX_MOD_DIR" || ! -f "$NGX_MOD_DIR/ngx_http_modsecurity_module.so" ]]; then
+    err "ModSecurity nginx module (ngx_http_modsecurity_module.so) not found."
+    err "Please build the connector against your Nginx version:"
+    err "  https://github.com/SpiderLabs/ModSecurity-nginx"
+    exit 1
+  fi
+  say "ModSecurity nginx module found at $NGX_MOD_DIR."
+
+  if ! grep -q 'ngx_http_modsecurity_module.so' /etc/nginx/nginx.conf 2>/dev/null; then
+    err "load_module directive missing in /etc/nginx/nginx.conf"
+    err "Add: load_module ${NGX_MOD_DIR}/ngx_http_modsecurity_module.so;"
+    exit 1
+  fi
+  say "load_module directive present in nginx.conf."
+
   fetch_and_run "waf-nginx.sh"
 else
   fetch_and_run "waf-apache.sh"

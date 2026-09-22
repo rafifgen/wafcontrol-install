@@ -82,49 +82,6 @@ NGX_USER="$(detect_nginx_user)"
 NGX_GROUP="$(id -gn "$NGX_USER" 2>/dev/null || echo "$NGX_USER")"
 say "Detected nginx user: $NGX_USER (group: $NGX_GROUP)"
 
-apt update -y
-apt install -y libmodsecurity3 libmodsecurity-dev || true
-
-if ! pkg-config --exists libmodsecurity; then
-  say "Building libmodsecurity from source..."
-  . /etc/os-release 2>/dev/null || true
-  PCRE_PKGS="libpcre3 libpcre3-dev"
-  XML2_PKGS="libxml2 libxml2-dev"
-  if { [ "${ID:-}" = "debian" ] && [ "${VERSION_CODENAME:-}" = "trixie" ]; } || \
-     { [ "${ID:-}" = "ubuntu" ] && [ "${VERSION_CODENAME:-}" = "noble" ]; }; then
-    PCRE_PKGS="libpcre2-dev"
-  elif [ "${ID:-}" = "debian" ] && [ "${VERSION_CODENAME:-}" = "bookworm" ]; then
-    PCRE_PKGS="libpcre3 libpcre3-dev libpcre2-dev"
-  fi
-
-  if { [ "${ID:-}" = "ubuntu" ] && [ "${VERSION_CODENAME:-}" = "resolute" ]; }; then
-  	XML2_PKGS="libxml2-dev"
-   	PCRE_PKGS="libpcre2-dev"
-  fi
-  apt install -y make gcc autoconf automake libtool gettext pkg-config \
-    libcurl4-openssl-dev liblua5.3-dev $PCRE_PKGS \
-    $XML2_PKGS libyajl-dev doxygen libgeoip-dev libssl-dev \
-    zlib1g-dev libxslt1-dev liblmdb-dev libgd-dev git uuid-dev
-
-  cd /usr/local/src
-  test -d ModSecurity || git clone --depth 1 --recursive -b v3/master https://github.com/SpiderLabs/ModSecurity
-  cd ModSecurity
-  git submodule sync --recursive
-  git submodule update --init --recursive
-  ./build.sh
-  ./configure
-  make -j"$(nproc)"
-  make install
-  ldconfig
-  say "libmodsecurity built and installed."
-else
-  say "libmodsecurity present via packages."
-fi
-
-test -d /usr/local/src/ModSecurity-nginx || git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git /usr/local/src/ModSecurity-nginx
-NVER="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" || NVER=""
-[[ -n "$NVER" ]] || { err "Cannot detect Nginx version."; exit 1; }
-
 detect_modules_dir() {
   local mp=""
   mp="$(nginx -V 2>&1 | sed -n 's/.*--modules-path=\([^ ]*\).*/\1/p' | tail -n1 || true)"
@@ -145,30 +102,33 @@ detect_modules_dir() {
 MOD_DIR="$(detect_modules_dir)"
 say "Using modules dir: $MOD_DIR"
 
-mkdir -p /usr/local/src/nginx && cd /usr/local/src/nginx
-if [[ ! -d "nginx-${NVER}" ]]; then
-  say "Fetching nginx source: ${NVER}"
-  wget -q "http://nginx.org/download/nginx-${NVER}.tar.gz"
-  tar -xzf "nginx-${NVER}.tar.gz"
+banner "Verifying ModSecurity prerequisites" "=" 72
+
+if ! pkg-config --exists libmodsecurity; then
+  err "libmodsecurity not found."
+  err "Please build and install libmodsecurity from source first:"
+  err "  https://github.com/SpiderLabs/ModSecurity/tree/v3/master"
+  exit 1
 fi
+say "libmodsecurity found via pkg-config."
 
-apt-get build-dep -y nginx || true
-cd "nginx-${NVER}"
-./configure --with-compat --add-dynamic-module=/usr/local/src/ModSecurity-nginx
-make modules
+if [[ ! -f "$MOD_DIR/ngx_http_modsecurity_module.so" ]]; then
+  err "ModSecurity nginx module not found at: $MOD_DIR/ngx_http_modsecurity_module.so"
+  err "Please build the ModSecurity-nginx connector against your Nginx version:"
+  err "  https://github.com/SpiderLabs/ModSecurity-nginx"
+  exit 1
+fi
+say "ModSecurity nginx module found: $MOD_DIR/ngx_http_modsecurity_module.so"
 
-install -d -m 0755 "$MOD_DIR"
-cp -f objs/ngx_http_modsecurity_module.so "$MOD_DIR/ngx_http_modsecurity_module.so"
-state_append_array CREATED_FILES "$MOD_DIR/ngx_http_modsecurity_module.so"
-say "Dynamic module built."
+if ! grep -q 'ngx_http_modsecurity_module.so' "$NGX_MAIN" 2>/dev/null; then
+  err "load_module directive for ngx_http_modsecurity_module.so not found in $NGX_MAIN"
+  err "Add this line at the top of your nginx.conf:"
+  err "  load_module ${MOD_DIR}/ngx_http_modsecurity_module.so;"
+  exit 1
+fi
+say "load_module directive present in nginx.conf."
 
 TS="$(date +%s)"
-if ! grep -q 'ngx_http_modsecurity_module.so' "$NGX_MAIN" 2>/dev/null; then
-  cp -a "$NGX_MAIN" "${NGX_MAIN}.bak.${TS}"
-  state_put_map BACKUPS "$NGX_MAIN" "${NGX_MAIN}.bak.${TS}"
-  sed -i "1iload_module ${MOD_DIR}/ngx_http_modsecurity_module.so;" "$NGX_MAIN"
-  say "Injected load_module into nginx.conf"
-fi
 
 find_http_file() {
   if grep -q '^[[:space:]]*http[[:space:]]*{' "$NGX_MAIN"; then
