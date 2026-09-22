@@ -619,8 +619,10 @@ state_append_array CREATED_UNITS "$CELERYB_UNIT"
 if [[ "$SERVER" == "nginx" ]]; then
   banner "Pre-check: ModSecurity prerequisites" "=" 72
   if ! pkg-config --exists libmodsecurity 2>/dev/null; then
-    err "libmodsecurity not found. Please build and install it first:"
-    err "  https://github.com/SpiderLabs/ModSecurity/tree/v3/master"
+    err "libmodsecurity not found via pkg-config."
+    err "Checked for: libmodsecurity.pc in $(pkg-config --variable pc_path pkg-config | tr ':' ' ')"
+    err "If ModSecurity is installed, check its actual .pc filename:"
+    err "  find / -iname '*modsecurity.pc' 2>/dev/null"
     exit 1
   fi
   say "libmodsecurity found."

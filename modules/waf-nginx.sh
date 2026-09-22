@@ -104,10 +104,18 @@ say "Using modules dir: $MOD_DIR"
 
 banner "Verifying ModSecurity prerequisites" "=" 72
 
-if ! pkg-config --exists libmodsecurity; then
-  err "libmodsecurity not found."
-  err "Please build and install libmodsecurity from source first:"
-  err "  https://github.com/SpiderLabs/ModSecurity/tree/v3/master"
+MODSEC_PC_DIR="/usr/local/modsecurity/lib/pkgconfig"
+if [ -f "${MODSEC_PC_DIR}/modsecurity.pc" ] && [ ! -f "${MODSEC_PC_DIR}/libmodsecurity.pc" ]; then
+  ln -sf "${MODSEC_PC_DIR}/modsecurity.pc" "${MODSEC_PC_DIR}/libmodsecurity.pc"
+fi
+mkdir -p /usr/local/lib/pkgconfig
+ln -sf "${MODSEC_PC_DIR}/libmodsecurity.pc" /usr/local/lib/pkgconfig/libmodsecurity.pc 2>/dev/null || true
+
+if ! pkg-config --exists libmodsecurity 2>/dev/null; then
+  err "libmodsecurity not found via pkg-config."
+  err "Checked for: libmodsecurity.pc in $(pkg-config --variable pc_path pkg-config | tr ':' ' ')"
+  err "If ModSecurity is installed, check its actual .pc filename:"
+  err "  find / -iname '*modsecurity.pc' 2>/dev/null"
   exit 1
 fi
 say "libmodsecurity found via pkg-config."
